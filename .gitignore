@@ -1,0 +1,20 @@
+# Rust / Anchor
+/target
+**/*.rs.bk
+.anchor
+test-ledger
+
+# Node
+node_modules
+.yarn
+yarn-error.log
+npm-debug.log*
+
+# Local
+.DS_Store
+*.log
+.env
+.env.*
+
+# Keep: Cargo.lock (reproducible SBF builds — the dependency pins matter),
+# SPEC.md, README, LICENSE-*, programs/, tests/, keeper/.

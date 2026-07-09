@@ -1,0 +1,22 @@
+[package]
+name = "recurring-buy"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Non-custodial recurring-buy (DCA) router for Solana, composed on the native Subscriptions rail"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "recurring_buy"
+
+[features]
+default = []
+cpi = ["no-entrypoint"]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build"]
+
+[dependencies]
+anchor-lang = "=0.31.1"
+anchor-spl = "=0.31.1"

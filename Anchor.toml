@@ -1,0 +1,20 @@
+[toolchain]
+anchor_version = "0.31.1"
+
+[features]
+resolution = true
+skip-lint = false
+
+[programs.localnet]
+recurring_buy = "H36vWFrN1iYWEAqweZ9BU8c7Wd35Adq9vCkprwLgMqsn"
+mock_swap = "H4SoWFSerNHbat7XxPKp1UTTtfp6o9LTrB7Z9zS1gPf3"
+
+[registry]
+url = "https://api.apr.dev"
+
+[provider]
+cluster = "Localnet"
+wallet = "~/.config/solana/id.json"
+
+[scripts]
+test = "yarn run ts-mocha -p ./tsconfig.json -t 1000000 tests/**/*.ts"

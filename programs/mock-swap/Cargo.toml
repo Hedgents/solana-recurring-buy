@@ -1,0 +1,22 @@
+[package]
+name = "mock-swap"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "TEST-ONLY mock swap venue for solana-recurring-buy. Not for production."
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "mock_swap"
+
+[features]
+default = []
+cpi = ["no-entrypoint"]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build"]
+
+[dependencies]
+anchor-lang = "=0.31.1"
+anchor-spl = "=0.31.1"
