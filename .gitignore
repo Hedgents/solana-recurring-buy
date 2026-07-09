@@ -15,6 +15,7 @@ npm-debug.log*
 *.log
 .env
 .env.*
+scripts/.devnet.json
 
 # Keep: Cargo.lock (reproducible SBF builds — the dependency pins matter),
 # SPEC.md, README, LICENSE-*, programs/, tests/, keeper/.

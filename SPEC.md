@@ -92,12 +92,12 @@ Extends the already-proven `subs-keeper` (native `@solana/subscriptions` client)
 - **M2:** third-party audit (single-purpose, small nSLOC → cheap).
 - **M3 (optional):** mainnet PAXG wiring + a reference front-end.
 
-## 11. Open questions to verify during implementation
+## 11. Open questions — status
 
-1. Exact native `transfer_recurring` destination flexibility, and whether the pulled funds require our PDA to sign the subsequent swap (verify against the deployed program + generated client; the earlier `subs-keeper` proved an arbitrary receiver ATA works).
-2. Jupiter CPI (shared-accounts route) interface + real tx-size in one tx with the native pull; single-pool Orca fallback if needed.
-3. Native PAXG-on-Solana mint address + a liquid devnet USDC/PAXG venue (devnet may need a mock mint + mock pool for tests).
-4. Whether the Pyth PAXG/USD feed exists on the target cluster; if not, a config-set reference price bound for devnet.
+1. **RESOLVED (devnet, 2026-07-09).** The native `transfer_recurring` deposits into the per-user transient PDA ATA, and `execute_buy` consumes it, swaps, and delivers to the user, **atomically in one transaction**. Proven on devnet by `keeper/native/e2e.mjs` (real native Subscriptions pull + router swap + delivery; transient drains to zero). The router forwarding a venue instruction under the PDA signature works on real chain.
+2. **OPEN (mainnet).** A live Jupiter route CPI'd under the transient PDA signer, plus one-tx size. Devnet used the deterministic mock venue (Jupiter has no real devnet liquidity); this must be verified against a live Jupiter route on mainnet, with a single-pool Orca/Raydium CPI as the fallback if a full aggregator route won't fit one transaction.
+3. PAXG-on-Solana mint + a liquid USDC/PAXG venue: devnet uses a mock mint + mock pool; mainnet wires native PAXG.
+4. Pyth PAXG/USD feed: devnet uses the config-set `price_ref_micros` floor; mainnet wires a Pyth read.
 
 ## 12. License
 

@@ -1,0 +1,9 @@
+{
+  "name": "recurring-buy-native-e2e",
+  "private": true,
+  "type": "module",
+  "description": "Isolated @solana/kit module: real native Subscriptions pull composed atomically with the router's execute_buy on devnet.",
+  "dependencies": {
+    "@solana/subscriptions": "^0.3.0"
+  }
+}

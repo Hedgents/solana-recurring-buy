@@ -27,9 +27,10 @@ The program enforces a set of **non-custody invariants** (destination must be th
 - [x] Design spec
 - [x] `execute_buy` router + all five non-custody invariants
 - [x] Localnet invariant test suite (7/7 passing, deterministic mock venue)
-- [ ] Keeper (composes native pull + swap route + `execute_buy`) + devnet e2e
+- [x] Keeper (composes native pull + swap route + `execute_buy`)
+- [x] Devnet e2e: **real** native Subscriptions pull + router, atomic, one tx ([`keeper/native/e2e.mjs`](./keeper/native/e2e.mjs))
 - [ ] Third-party audit
-- [ ] Mainnet reference (PAXG) + front-end
+- [ ] Mainnet reference (PAXG, live Jupiter route) + front-end
 
 ## License
 
