@@ -15,6 +15,7 @@ use anchor_lang::solana_program::{
     instruction::{AccountMeta, Instruction},
     program::invoke_signed,
 };
+use anchor_spl::associated_token::get_associated_token_address;
 use anchor_spl::token::{Mint, Token, TokenAccount};
 
 pub mod errors;
@@ -37,6 +38,9 @@ pub mod recurring_buy {
     ) -> Result<()> {
         require!(swap_programs.len() <= MAX_SWAP_PROGRAMS, BuyError::TooManyVenues);
         require!(max_slippage_bps <= 10_000, BuyError::BadParam);
+        // Bound target decimals so the u128 floor math cannot overflow-revert a
+        // legitimate buy (10^decimals * amount_in). SPL mints are <= 9 in practice.
+        require!(ctx.accounts.target_mint.decimals <= 12, BuyError::BadParam);
         let cfg = &mut ctx.accounts.config;
         cfg.admin = ctx.accounts.admin.key();
         cfg.target_mint = ctx.accounts.target_mint.key();
@@ -96,19 +100,20 @@ pub mod recurring_buy {
         let cfg = &ctx.accounts.config;
         require!(!cfg.paused, BuyError::Paused);
 
-        // INV-1: destination MUST be the subscriber's own ATA for the target mint.
+        // INV-1: destination MUST be the subscriber's OWN CANONICAL ATA for the
+        // target mint (canonical-ATA binding, not merely owner == user).
+        require_keys_eq!(ctx.accounts.dest_ata.mint, cfg.target_mint, BuyError::WrongTargetMint);
         require_keys_eq!(
-            ctx.accounts.dest_ata.owner,
-            ctx.accounts.user.key(),
+            ctx.accounts.dest_ata.key(),
+            get_associated_token_address(&ctx.accounts.user.key(), &cfg.target_mint),
             BuyError::DestinationNotOwner
         );
-        require_keys_eq!(ctx.accounts.dest_ata.mint, cfg.target_mint, BuyError::WrongTargetMint);
 
-        // The transient MUST be the per-user PDA's USDC account.
+        // The transient MUST be the per-user PDA's CANONICAL USDC ATA.
         require_keys_eq!(ctx.accounts.transient_usdc.mint, cfg.usdc_mint, BuyError::BadTransient);
         require_keys_eq!(
-            ctx.accounts.transient_usdc.owner,
-            ctx.accounts.buy_authority.key(),
+            ctx.accounts.transient_usdc.key(),
+            get_associated_token_address(&ctx.accounts.buy_authority.key(), &cfg.usdc_mint),
             BuyError::BadTransient
         );
 
@@ -121,17 +126,20 @@ pub mod recurring_buy {
             BuyError::VenueNotWhitelisted
         );
 
-        // INV-2 (floor): min_out must clear the price-sanity floor so a keeper
-        // (or MEV) cannot force an underpriced buy on the user.
-        if cfg.price_ref_micros > 0 {
-            let floor = price_floor(
-                amount_in,
-                cfg.price_ref_micros,
-                cfg.target_decimals,
-                cfg.max_slippage_bps,
-            )?;
-            require!(min_out >= floor, BuyError::MinOutTooLow);
-        }
+        // INV-2 (floor): the price-sanity floor is MANDATORY. `min_out` is
+        // keeper-supplied and can never be the sole protection, so a config with
+        // price_ref_micros == 0 is treated as unconfigured and execution is
+        // refused (mainnet must set a reference price or wire a Pyth read). The
+        // floor (reference price minus max slippage) bounds any keeper/MEV
+        // underpayment to the tolerated band.
+        require!(cfg.price_ref_micros > 0, BuyError::FloorNotConfigured);
+        let floor = price_floor(
+            amount_in,
+            cfg.price_ref_micros,
+            cfg.target_decimals,
+            cfg.max_slippage_bps,
+        )?;
+        require!(min_out >= floor, BuyError::MinOutTooLow);
 
         let dest_before = ctx.accounts.dest_ata.amount;
 
@@ -222,6 +230,36 @@ pub struct BuyExecuted {
     pub amount_in: u64,
     pub amount_out: u64,
     pub venue: Pubkey,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::price_floor;
+
+    #[test]
+    fn floor_6dp_dollar() {
+        // $10 USDC (10_000_000) at $1.00/token, 6 dp, 1% slippage -> 9.9 tokens.
+        assert_eq!(price_floor(10_000_000, 1_000_000, 6, 100).unwrap(), 9_900_000);
+    }
+
+    #[test]
+    fn floor_9dp_high_price() {
+        // $2000 USDC at $2000/token (price_ref = 2_000_000_000 micro-USD), 9 dp,
+        // 0.5% slippage. ideal = 2000e6 * 1e9 / 2000e6 = 1e9 base units (1.0 token);
+        // floor = 1e9 * 9950/10000 = 995_000_000.
+        assert_eq!(price_floor(2_000_000_000, 2_000_000_000, 9, 50).unwrap(), 995_000_000);
+    }
+
+    #[test]
+    fn floor_zero_slippage_is_ideal() {
+        assert_eq!(price_floor(5_000_000, 1_000_000, 6, 0).unwrap(), 5_000_000);
+    }
+
+    #[test]
+    fn floor_rounds_down() {
+        // 7 USDC at $3/token, 6 dp, 0 slippage: 7e6 * 1e6 / 3e6 = 2_333_333.33 -> 2_333_333.
+        assert_eq!(price_floor(7_000_000, 3_000_000, 6, 0).unwrap(), 2_333_333);
+    }
 }
 
 #[derive(Accounts)]

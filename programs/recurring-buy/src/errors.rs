@@ -14,6 +14,8 @@ pub enum BuyError {
     NothingPulled,
     #[msg("Swap program is not whitelisted")]
     VenueNotWhitelisted,
+    #[msg("INV-2: price floor is not configured (price_ref_micros == 0); refusing to execute")]
+    FloorNotConfigured,
     #[msg("INV-2: min_out is below the price-sanity floor")]
     MinOutTooLow,
     #[msg("INV-3: transient account was not fully drained by the swap")]

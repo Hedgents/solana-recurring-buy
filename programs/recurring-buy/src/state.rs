@@ -20,8 +20,9 @@ pub struct Config {
     pub swap_programs: [Pubkey; MAX_SWAP_PROGRAMS],
     pub swap_program_count: u8,
     /// Price-sanity reference: micro-USD per 1.0 whole target token.
-    /// 0 disables the on-chain floor (rely on keeper `min_out` only).
-    /// Mainnet MUST set this (or wire a Pyth read) so a keeper cannot underpay.
+    /// The floor is MANDATORY: `execute_buy` refuses to run while this is 0
+    /// (treated as unconfigured). Mainnet must set a real reference (or wire a
+    /// Pyth read) so a keeper can never underpay beyond `max_slippage_bps`.
     pub price_ref_micros: u64,
     /// Decimals of the target mint (cached for the floor computation).
     pub target_decimals: u8,

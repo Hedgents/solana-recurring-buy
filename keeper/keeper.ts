@@ -137,10 +137,19 @@ export class RecurringBuyKeeper {
   }
 
   /**
-   * DEVNET/MAINNET swap leg: a Jupiter route USDC -> target. `userAuthority` is
-   * the transient PDA (it signs via the router's invoke_signed); destination is
-   * the user's own target ATA. NOTE: CPI-ing Jupiter from the router under a PDA
-   * signer + one-tx size is the open item in SPEC ss.11 — verify on devnet.
+   * MAINNET swap leg (SCAFFOLD — not production-ready). A Jupiter route
+   * USDC -> target, output to the user's own ATA, source authority = the
+   * transient PDA (signs via the router's invoke_signed).
+   *
+   * KNOWN INCOMPLETE (SPEC §11.2, tracked in AUDIT.md as K-1), because Jupiter
+   * has no real devnet liquidity so this path is unverified:
+   *   - it returns `luts: []` but does NOT resolve `addressLookupTableAddresses`
+   *     (fetch those accounts and pass them to `composeAndSend({ luts })`);
+   *   - it ignores Jupiter's setup/cleanup/compute-budget instructions;
+   *   - the router forwards exactly ONE instruction, so a route needing setup
+   *     within the CPI won't fit — verify one-tx size on mainnet, and fall back
+   *     to a single-pool (Orca/Raydium) CPI if a full aggregator route won't fit.
+   * Do not present this as functional until verified on mainnet.
    */
   async buildJupiterSwap(args: {
     user: PublicKey;
@@ -155,6 +164,9 @@ export class RecurringBuyKeeper {
         `&amount=${args.amountIn.toString()}&slippageBps=${args.slippageBps}&onlyDirectRoutes=true`
     );
     const quote = await q.json();
+    if (!q.ok || quote.error) {
+      throw new Error("Jupiter quote failed: " + (quote.error ?? `HTTP ${q.status}`));
+    }
     const r = await fetch(`${api}/swap-instructions`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },

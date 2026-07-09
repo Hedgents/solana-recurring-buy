@@ -230,6 +230,33 @@ describe("recurring-buy: non-custodial recurring buy invariants", () => {
     assert.equal(await bal(sub.dest), 10_000_000, "user received target via keeper");
   });
 
+  it("INV-2 floor is MANDATORY: refuses when price_ref is unconfigured (0)", async () => {
+    await rb.methods.setParams(new anchor.BN(0), MAX_SLIPPAGE_BPS)
+      .accounts({ admin: payer.publicKey, config }).rpc();
+    const sub = await newSubscriber(10_000_000);
+    const swap = await buildSwap(sub.transient, sub.buyAuth, sub.dest, 10_000_000, 10_000_000);
+    try {
+      await executeBuy(sub, 1, swap); // min_out=1 would be theft if the floor were optional
+      assert.fail("should have reverted");
+    } catch (e: any) {
+      assert.equal(e.error?.errorCode?.code, "FloorNotConfigured");
+    }
+    assert.equal(await bal(sub.transient), 10_000_000, "funds untouched on revert");
+    await rb.methods.setParams(PRICE_REF_MICROS, MAX_SLIPPAGE_BPS)
+      .accounts({ admin: payer.publicKey, config }).rpc();
+  });
+
+  it("admin-only: a non-admin cannot change params", async () => {
+    const intruder = Keypair.generate();
+    try {
+      await rb.methods.setParams(new anchor.BN(1), 1)
+        .accounts({ admin: intruder.publicKey, config }).signers([intruder]).rpc();
+      assert.fail("should have reverted");
+    } catch (e: any) {
+      assert.ok(e, "non-admin rejected");
+    }
+  });
+
   it("pause halts execution", async () => {
     await rb.methods.setPause(true).accounts({ admin: payer.publicKey, config }).rpc();
     const sub = await newSubscriber(10_000_000);
