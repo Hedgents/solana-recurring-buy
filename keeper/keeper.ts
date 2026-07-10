@@ -41,6 +41,7 @@ export const SUBSCRIPTIONS_PROGRAM = new PublicKey(
 );
 
 const CONFIG_SEED = Buffer.from("config");
+const FEE_CONFIG_SEED = Buffer.from("fee");
 const BUY_AUTH_SEED = Buffer.from("buy");
 const SELL_PLAN_SEED = Buffer.from("sell-plan");
 
@@ -66,6 +67,18 @@ export class RecurringBuyKeeper {
     this.config = PublicKey.findProgramAddressSync([CONFIG_SEED], program.programId)[0];
     this.usdcMint = cfg.usdcMint;
     this.targetMint = cfg.targetMint;
+  }
+
+  /** Protocol fee config PDA. */
+  feeConfig(): PublicKey {
+    return PublicKey.findProgramAddressSync([FEE_CONFIG_SEED], this.program.programId)[0];
+  }
+
+  /** Fetch the fee destination + derive its canonical ATA for `mint`. */
+  async feeAta(mint: PublicKey): Promise<PublicKey> {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const fc: any = await (this.program.account as any).feeConfig.fetch(this.feeConfig());
+    return getAssociatedTokenAddressSync(mint, fc.destination as PublicKey);
   }
 
   /** Per-user transient signing PDA (authority of the transient USDC account). */
@@ -111,6 +124,8 @@ export class RecurringBuyKeeper {
         destAta: this.destAta(args.user),
         swapProgram: args.swap.program,
         tokenProgram: TOKEN_PROGRAM_ID,
+        feeConfig: this.feeConfig(),
+        feeAta: await this.feeAta(this.usdcMint),
       })
       .remainingAccounts(args.swap.keys)
       .instruction();
@@ -188,6 +203,8 @@ export class RecurringBuyKeeper {
         destUsdc: this.destUsdc(args.user),
         swapProgram: args.swap.program,
         tokenProgram: TOKEN_PROGRAM_ID,
+        feeConfig: this.feeConfig(),
+        feeAta: await this.feeAta(this.targetMint),
       })
       .remainingAccounts(args.swap.keys)
       .instruction();

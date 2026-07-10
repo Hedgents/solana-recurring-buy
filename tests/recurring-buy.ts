@@ -17,6 +17,7 @@ const rbIdl = require("../target/idl/recurring_buy.json");
 const msIdl = require("../target/idl/mock_swap.json");
 
 const CONFIG_SEED = Buffer.from("config");
+const FEE_CONFIG_SEED = Buffer.from("fee");
 const BUY_AUTH_SEED = Buffer.from("buy");
 const POOL_SEED = Buffer.from("pool");
 
@@ -36,6 +37,9 @@ describe("recurring-buy: non-custodial recurring buy invariants", () => {
   const ms = new anchor.Program(msIdl, provider);
 
   let usdcMint: PublicKey;
+  let feeConfig: PublicKey;
+  let feeUsdcAta: PublicKey;
+  let feeTargetAta: PublicKey;
   let targetMint: PublicKey;
   let config: PublicKey;
   let poolAuthority: PublicKey;
@@ -95,6 +99,8 @@ describe("recurring-buy: non-custodial recurring buy invariants", () => {
         destAta: sub.dest,
         swapProgram,
         tokenProgram: TOKEN_PROGRAM_ID,
+        feeConfig,
+        feeAta: feeUsdcAta,
       })
       .remainingAccounts(swap.keys)
       .rpc();
@@ -124,6 +130,13 @@ describe("recurring-buy: non-custodial recurring buy invariants", () => {
         systemProgram: anchor.web3.SystemProgram.programId,
       })
       .rpc();
+
+    // Protocol fee: config PDA (default 0 bps) + the destination's canonical ATAs.
+    feeConfig = PublicKey.findProgramAddressSync([FEE_CONFIG_SEED], rb.programId)[0];
+    feeUsdcAta = await createAta(usdcMint, payer.publicKey);
+    feeTargetAta = await createAta(targetMint, payer.publicKey);
+    await rb.methods.initFeeConfig(0, payer.publicKey)
+      .accountsPartial({ admin: payer.publicKey, config, feeConfig }).rpc();
   });
 
   it("happy path: pulls, swaps, delivers to the user; transient drains to zero", async () => {
@@ -177,6 +190,8 @@ describe("recurring-buy: non-custodial recurring buy invariants", () => {
           destAta: attackerDest,
           swapProgram: ms.programId,
           tokenProgram: TOKEN_PROGRAM_ID,
+          feeConfig,
+          feeAta: feeUsdcAta,
         })
         .remainingAccounts(swap.keys)
         .rpc();
@@ -337,6 +352,8 @@ describe("recurring-buy: non-custodial recurring buy invariants", () => {
           destUsdc: r.destUsdc,
           swapProgram: ms.programId,
           tokenProgram: TOKEN_PROGRAM_ID,
+          feeConfig,
+          feeAta: feeTargetAta,
         })
         .remainingAccounts(swap.keys)
         .rpc();
@@ -438,6 +455,7 @@ describe("recurring-buy: non-custodial recurring buy invariants", () => {
             buyAuthority: r.buyAuth, transientTarget: r.transientTarget,
             userTargetAta: r.userTarget, destUsdc: attackerUsdc,
             swapProgram: ms.programId, tokenProgram: TOKEN_PROGRAM_ID,
+            feeConfig, feeAta: feeTargetAta,
           })
           .remainingAccounts(swap.keys).rpc();
         assert.fail("should have reverted");
@@ -470,6 +488,7 @@ describe("recurring-buy: non-custodial recurring buy invariants", () => {
             buyAuthority: r.buyAuth, transientTarget: r.transientTarget,
             userTargetAta: r.userTarget, destUsdc: r.destUsdc,
             swapProgram: Keypair.generate().publicKey, tokenProgram: TOKEN_PROGRAM_ID,
+            feeConfig, feeAta: feeTargetAta,
           })
           .remainingAccounts(swap.keys).rpc();
         assert.fail("should have reverted");
@@ -504,6 +523,7 @@ describe("recurring-buy: non-custodial recurring buy invariants", () => {
             userTargetAta: r.transientTarget, // not the user's canonical target ATA
             destUsdc: r.destUsdc,
             swapProgram: ms.programId, tokenProgram: TOKEN_PROGRAM_ID,
+            feeConfig, feeAta: feeTargetAta,
           })
           .remainingAccounts(swap.keys).rpc();
         assert.fail("should have reverted");
@@ -580,6 +600,96 @@ describe("recurring-buy: non-custodial recurring buy invariants", () => {
         .rpc();
       const gone = await connection.getAccountInfo(r.plan);
       assert.isNull(gone, "plan account closed");
+    });
+  });
+
+  describe("protocol fee (fixed bps of flow, capped, default 0)", () => {
+    const SELL_PLAN_SEED = Buffer.from("sell-plan");
+    const setFee = (bps: number) =>
+      rb.methods.setFee(bps, payer.publicKey)
+        .accountsPartial({ admin: payer.publicKey, config, feeConfig }).rpc();
+
+    it("buy skims the fee to the destination ATA; user gets the net", async () => {
+      await setFee(50); // 0.50%
+      const feeBefore = await bal(feeUsdcAta);
+      const sub = await newSubscriber(10_000_000);
+      // fee = 50_000, net = 9_950_000; venue swaps the net 1:1
+      const swap = await buildSwap(sub.transient, sub.buyAuth, sub.dest, 9_950_000, 9_950_000);
+      await executeBuy(sub, 9_850_500, swap); // floor over NET = 9_950_000 * 0.99
+      assert.equal(await bal(sub.dest), 9_950_000, "user received the NET");
+      assert.equal(await bal(feeUsdcAta), feeBefore + 50_000, "fee skimmed to destination");
+      assert.equal(await bal(sub.transient), 0, "transient still drains to zero");
+      await setFee(0);
+    });
+
+    it("sell skims the fee in kind; proceeds cover the net", async () => {
+      await setFee(50);
+      const feeBefore = await bal(feeTargetAta);
+      const user = Keypair.generate();
+      const buyAuth = buyAuthPda(user.publicKey);
+      const transientTarget = await createAta(targetMint, buyAuth, true);
+      const userTarget = await createAta(targetMint, user.publicKey);
+      const destUsdc = await createAta(usdcMint, user.publicKey);
+      await mintTo(connection, payer, targetMint, userTarget, payer, 90_000_000);
+      await mintTo(connection, payer, targetMint, transientTarget, payer, 10_000_000);
+      await provider.sendAndConfirm(new Transaction().add(
+        anchor.web3.SystemProgram.transfer({ fromPubkey: payer.publicKey, toPubkey: user.publicKey, lamports: 100_000_000 })
+      ), []);
+      const plan = PublicKey.findProgramAddressSync([SELL_PLAN_SEED, user.publicKey.toBuffer()], rb.programId)[0];
+      const now = Math.floor(Date.now() / 1000);
+      await rb.methods.openSellPlan(new anchor.BN(now + 10 * 60 + 55), new anchor.BN(60))
+        .accountsPartial({ user: user.publicKey, sellPlan: plan }).signers([user]).rpc();
+      // fee = 50_000 target, net = 9_950_000 swapped 1:1 to USDC
+      const swapIx = await ms.methods.swap(new anchor.BN(9_950_000), new anchor.BN(9_950_000))
+        .accounts({ sourceUsdc: transientTarget, sourceAuthority: buyAuth, poolUsdc: poolTarget,
+          poolTarget: poolUsdc, destTarget: destUsdc, poolAuthority, tokenProgram: TOKEN_PROGRAM_ID })
+        .instruction();
+      await rb.methods.executeSell(new anchor.BN(9_850_500), swapIx.data)
+        .accounts({ keeper: payer.publicKey, config, user: user.publicKey, sellPlan: plan,
+          buyAuthority: buyAuth, transientTarget, userTargetAta: userTarget, destUsdc,
+          swapProgram: ms.programId, tokenProgram: TOKEN_PROGRAM_ID,
+          feeConfig, feeAta: feeTargetAta })
+        .remainingAccounts(swapIx.keys).rpc();
+      assert.equal(await bal(destUsdc), 9_950_000, "user received NET proceeds");
+      assert.equal(await bal(feeTargetAta), feeBefore + 50_000, "fee skimmed in kind");
+      assert.equal(await bal(transientTarget), 0, "transient drains to zero");
+      await setFee(0);
+    });
+
+    it("set_fee enforces the compiled-in cap and admin gating", async () => {
+      try {
+        await setFee(101);
+        assert.fail("should have reverted");
+      } catch (e: any) {
+        assert.equal(e.error?.errorCode?.code, "FeeTooHigh");
+      }
+      const intruder = Keypair.generate();
+      try {
+        await rb.methods.setFee(10, intruder.publicKey)
+          .accountsPartial({ admin: intruder.publicKey, config, feeConfig })
+          .signers([intruder]).rpc();
+        assert.fail("should have reverted");
+      } catch (e: any) {
+        assert.ok(e, "non-admin rejected");
+      }
+    });
+
+    it("rejects a non-canonical fee account (BadFeeAccount)", async () => {
+      await setFee(50);
+      const sub = await newSubscriber(10_000_000);
+      const swap = await buildSwap(sub.transient, sub.buyAuth, sub.dest, 9_950_000, 9_950_000);
+      try {
+        await rb.methods.executeBuy(new anchor.BN(9_850_500), swap.data)
+          .accounts({ keeper: payer.publicKey, config, user: sub.user.publicKey,
+            buyAuthority: sub.buyAuth, transientUsdc: sub.transient, destAta: sub.dest,
+            swapProgram: ms.programId, tokenProgram: TOKEN_PROGRAM_ID,
+            feeConfig, feeAta: sub.transient }) // not the destination's canonical USDC ATA
+          .remainingAccounts(swap.keys).rpc();
+        assert.fail("should have reverted");
+      } catch (e: any) {
+        assert.equal(e.error?.errorCode?.code, "BadFeeAccount");
+      }
+      await setFee(0);
     });
   });
 });

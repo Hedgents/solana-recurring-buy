@@ -16,7 +16,7 @@ use anchor_lang::solana_program::{
     program::invoke_signed,
 };
 use anchor_spl::associated_token::get_associated_token_address;
-use anchor_spl::token::{Mint, Token, TokenAccount};
+use anchor_spl::token::{self, Mint, Token, TokenAccount, Transfer};
 
 pub mod errors;
 pub mod state;
@@ -78,6 +78,27 @@ pub mod recurring_buy {
         Ok(())
     }
 
+    /// One-time: create the protocol fee config (default should be 0 for a
+    /// public-good reference deployment). Admin-gated via the main Config.
+    pub fn init_fee_config(ctx: Context<InitFeeConfig>, fee_bps: u16, destination: Pubkey) -> Result<()> {
+        require!(fee_bps <= MAX_FEE_BPS, BuyError::FeeTooHigh);
+        let fc = &mut ctx.accounts.fee_config;
+        fc.fee_bps = fee_bps;
+        fc.destination = destination;
+        fc.bump = ctx.bumps.fee_config;
+        Ok(())
+    }
+
+    /// Adjust the execution fee (bounded by the compiled-in cap) / destination.
+    /// Changing this only affects WHERE the bounded fee goes, never user funds.
+    pub fn set_fee(ctx: Context<SetFee>, fee_bps: u16, destination: Pubkey) -> Result<()> {
+        require!(fee_bps <= MAX_FEE_BPS, BuyError::FeeTooHigh);
+        let fc = &mut ctx.accounts.fee_config;
+        fc.fee_bps = fee_bps;
+        fc.destination = destination;
+        Ok(())
+    }
+
     pub fn set_whitelist(ctx: Context<AdminOnly>, swap_programs: Vec<Pubkey>) -> Result<()> {
         require!(swap_programs.len() <= MAX_SWAP_PROGRAMS, BuyError::TooManyVenues);
         let cfg = &mut ctx.accounts.config;
@@ -129,15 +150,31 @@ pub mod recurring_buy {
             BuyError::VenueNotWhitelisted
         );
 
+        // Protocol execution fee (fixed bps of the INPUT, skimmed pre-swap;
+        // rounds DOWN, favoring the user; capped at MAX_FEE_BPS). The venue
+        // then swaps the NET amount, and the floor protects the NET amount.
+        let fee = (amount_in as u128)
+            .checked_mul(ctx.accounts.fee_config.fee_bps as u128)
+            .ok_or(BuyError::Overflow)?
+            .checked_div(10_000u128)
+            .ok_or(BuyError::Overflow)? as u64;
+        let net_in = amount_in.checked_sub(fee).ok_or(BuyError::Overflow)?;
+        require!(net_in > 0, BuyError::NothingPulled);
+        require_keys_eq!(
+            ctx.accounts.fee_ata.key(),
+            get_associated_token_address(&ctx.accounts.fee_config.destination, &cfg.usdc_mint),
+            BuyError::BadFeeAccount
+        );
+
         // INV-2 (floor): the price-sanity floor is MANDATORY. `min_out` is
         // keeper-supplied and can never be the sole protection, so a config with
         // price_ref_micros == 0 is treated as unconfigured and execution is
         // refused (mainnet must set a reference price or wire a Pyth read). The
         // floor (reference price minus max slippage) bounds any keeper/MEV
-        // underpayment to the tolerated band.
+        // underpayment to the tolerated band. Computed on the NET input.
         require!(cfg.price_ref_micros > 0, BuyError::FloorNotConfigured);
         let floor = price_floor(
-            amount_in,
+            net_in,
             cfg.price_ref_micros,
             cfg.target_decimals,
             cfg.max_slippage_bps,
@@ -169,6 +206,23 @@ pub mod recurring_buy {
         let signer_seeds: &[&[u8]] =
             &[BUY_AUTH_SEED, user_key.as_ref(), &[ctx.bumps.buy_authority]];
 
+        // Skim the fee (if any) from the transient to the destination's
+        // canonical ATA, signed by the transient PDA, BEFORE the venue swap.
+        if fee > 0 {
+            token::transfer(
+                CpiContext::new_with_signer(
+                    ctx.accounts.token_program.to_account_info(),
+                    Transfer {
+                        from: ctx.accounts.transient_usdc.to_account_info(),
+                        to: ctx.accounts.fee_ata.to_account_info(),
+                        authority: ctx.accounts.buy_authority.to_account_info(),
+                    },
+                    &[signer_seeds],
+                ),
+                fee,
+            )?;
+        }
+
         let mut infos = ctx.remaining_accounts.to_vec();
         infos.push(ctx.accounts.swap_program.to_account_info());
         invoke_signed(&ix, &infos, &[signer_seeds])?;
@@ -193,6 +247,7 @@ pub mod recurring_buy {
             user: user_key,
             amount_in,
             amount_out: out,
+            fee,
             venue: ctx.accounts.swap_program.key(),
         });
         Ok(())
@@ -290,11 +345,26 @@ pub mod recurring_buy {
             BuyError::VenueNotWhitelisted
         );
 
-        // INV-2 (mandatory floor, sell direction): min USDC out for the pulled
+        // Protocol execution fee (fixed bps of the INPUT target amount, skimmed
+        // pre-swap in kind; rounds DOWN; capped). The venue swaps the NET.
+        let fee = (amount_in as u128)
+            .checked_mul(ctx.accounts.fee_config.fee_bps as u128)
+            .ok_or(BuyError::Overflow)?
+            .checked_div(10_000u128)
+            .ok_or(BuyError::Overflow)? as u64;
+        let net_in = amount_in.checked_sub(fee).ok_or(BuyError::Overflow)?;
+        require!(net_in > 0, BuyError::NothingPulled);
+        require_keys_eq!(
+            ctx.accounts.fee_ata.key(),
+            get_associated_token_address(&ctx.accounts.fee_config.destination, &cfg.target_mint),
+            BuyError::BadFeeAccount
+        );
+
+        // INV-2 (mandatory floor, sell direction): min USDC out for the NET
         // target amount at the reference price minus the slippage band.
         require!(cfg.price_ref_micros > 0, BuyError::FloorNotConfigured);
         let floor = sell_floor(
-            amount_in,
+            net_in,
             cfg.price_ref_micros,
             cfg.target_decimals,
             cfg.max_slippage_bps,
@@ -324,6 +394,23 @@ pub mod recurring_buy {
         let user_key = ctx.accounts.user.key();
         let signer_seeds: &[&[u8]] =
             &[BUY_AUTH_SEED, user_key.as_ref(), &[ctx.bumps.buy_authority]];
+
+        // Skim the fee (if any) in kind, signed by the transient PDA, BEFORE
+        // the venue swap.
+        if fee > 0 {
+            token::transfer(
+                CpiContext::new_with_signer(
+                    ctx.accounts.token_program.to_account_info(),
+                    Transfer {
+                        from: ctx.accounts.transient_target.to_account_info(),
+                        to: ctx.accounts.fee_ata.to_account_info(),
+                        authority: ctx.accounts.buy_authority.to_account_info(),
+                    },
+                    &[signer_seeds],
+                ),
+                fee,
+            )?;
+        }
 
         let mut infos = ctx.remaining_accounts.to_vec();
         infos.push(ctx.accounts.swap_program.to_account_info());
@@ -364,6 +451,7 @@ pub mod recurring_buy {
             user: user_key,
             amount_in,
             amount_out: out,
+            fee,
             venue: ctx.accounts.swap_program.key(),
         });
         Ok(())
@@ -431,6 +519,7 @@ pub struct BuyExecuted {
     pub user: Pubkey,
     pub amount_in: u64,
     pub amount_out: u64,
+    pub fee: u64,
     pub venue: Pubkey,
 }
 
@@ -439,6 +528,7 @@ pub struct SellExecuted {
     pub user: Pubkey,
     pub amount_in: u64,
     pub amount_out: u64,
+    pub fee: u64,
     pub venue: Pubkey,
 }
 
@@ -519,6 +609,32 @@ pub struct AdminOnly<'info> {
 }
 
 #[derive(Accounts)]
+pub struct InitFeeConfig<'info> {
+    #[account(mut)]
+    pub admin: Signer<'info>,
+    #[account(seeds = [CONFIG_SEED], bump = config.bump, has_one = admin)]
+    pub config: Account<'info, Config>,
+    #[account(
+        init,
+        payer = admin,
+        space = 8 + FeeConfig::INIT_SPACE,
+        seeds = [FEE_CONFIG_SEED],
+        bump
+    )]
+    pub fee_config: Account<'info, FeeConfig>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct SetFee<'info> {
+    pub admin: Signer<'info>,
+    #[account(seeds = [CONFIG_SEED], bump = config.bump, has_one = admin)]
+    pub config: Account<'info, Config>,
+    #[account(mut, seeds = [FEE_CONFIG_SEED], bump = fee_config.bump)]
+    pub fee_config: Account<'info, FeeConfig>,
+}
+
+#[derive(Accounts)]
 pub struct OpenSellPlan<'info> {
     #[account(mut)]
     pub user: Signer<'info>,
@@ -577,6 +693,11 @@ pub struct ExecuteSell<'info> {
     /// CHECK: verified against the config whitelist in the handler.
     pub swap_program: UncheckedAccount<'info>,
     pub token_program: Program<'info, Token>,
+    #[account(seeds = [FEE_CONFIG_SEED], bump = fee_config.bump)]
+    pub fee_config: Account<'info, FeeConfig>,
+    /// The destination's canonical ATA for the INPUT (target) mint; bound in-handler.
+    #[account(mut)]
+    pub fee_ata: Account<'info, TokenAccount>,
 }
 
 #[derive(Accounts)]
@@ -600,4 +721,9 @@ pub struct ExecuteBuy<'info> {
     /// CHECK: verified against the config whitelist in the handler.
     pub swap_program: UncheckedAccount<'info>,
     pub token_program: Program<'info, Token>,
+    #[account(seeds = [FEE_CONFIG_SEED], bump = fee_config.bump)]
+    pub fee_config: Account<'info, FeeConfig>,
+    /// The destination's canonical ATA for the INPUT (USDC) mint; bound in-handler.
+    #[account(mut)]
+    pub fee_ata: Account<'info, TokenAccount>,
 }

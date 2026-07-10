@@ -74,7 +74,15 @@ async function main() {
   const now = Number(await rpc.getBlockTime(slot).send());
   const periods = BigInt(Math.max(Math.floor((F.sellEndTs - now) / F.sellPeriodSecs), 1));
   const DRAW = pot / periods;
-  const MIN_OUT = (DRAW * 99n) / 100n; // $1 ref, 1% slippage band
+  // Protocol fee: net-size the venue leg.
+  const { getProgramDerivedAddress, getUtf8Encoder, getBase58Decoder } = await import("@solana/kit");
+  const [feePda] = await getProgramDerivedAddress({ programAddress: address(F.recurringBuy), seeds: [getUtf8Encoder().encode("fee")] });
+  const feeInfo = await rpc.getAccountInfo(feePda, { encoding: "base64" }).send();
+  const feeBps = feeInfo.value ? BigInt(Buffer.from(feeInfo.value.data[0], "base64").readUInt16LE(8)) : 0n;
+  const feeDest = feeInfo.value ? getBase58Decoder().decode(Buffer.from(feeInfo.value.data[0], "base64").subarray(10, 42)) : owner.address;
+  const FEE = (DRAW * feeBps) / 10_000n;
+  const NET = DRAW - FEE;
+  const MIN_OUT = (NET * 99n) / 100n; // $1 ref, 1% slippage band
   console.log(`pot ${pot} target units, ${periods} periods left -> draw ${DRAW}, min_out ${MIN_OUT}`);
 
   // Native rail, TARGET mint this time (the mint-parameterized check).
@@ -113,8 +121,11 @@ async function main() {
     transferData: { amount: DRAW, delegator: owner.address, mint: TARGET },
   });
 
+  const { findAssociatedTokenPda } = await import("@solana-program/token");
+  const [feeAta] = await findAssociatedTokenPda({ owner: address(feeDest), mint: TARGET, tokenProgram: TOKEN_PROGRAM_ADDRESS });
+
   // Mock venue reversed: pool receives target, pays USDC to the user's USDC ATA.
-  const swapData = cat(disc(msIdl, "swap"), u64(DRAW), u64(DRAW)); // $1: out == in
+  const swapData = cat(disc(msIdl, "swap"), u64(NET), u64(NET)); // $1: out == in
   const swapAccts = [
     acc(F.transientTarget, AccountRole.WRITABLE),  // source (target)
     acc(F.buyAuthority, AccountRole.READONLY),     // source_authority (router forces signer)
@@ -140,6 +151,8 @@ async function main() {
       acc(F.destUsdcAta, AccountRole.WRITABLE),
       acc(F.mockSwap, AccountRole.READONLY),
       acc(TOKEN_PROGRAM_ADDRESS, AccountRole.READONLY),
+      acc(feePda, AccountRole.READONLY),
+      acc(feeAta, AccountRole.WRITABLE),
       ...swapAccts,
     ],
     data: execData,
@@ -157,6 +170,7 @@ async function main() {
   console.log(`user USDC: ${usdcBefore} -> ${usdcAfter} (delta ${usdcAfter - usdcBefore})`);
   console.log(`transient target after: ${trans} (must be 0)`);
   if (usdcAfter - usdcBefore < MIN_OUT) throw new Error("proceeds below min_out");
+  console.log(`fee skimmed: ${FEE} target units (bps ${feeBps})`);
   if (trans !== 0n) throw new Error("transient not drained");
   if (pot - potAfter !== DRAW) throw new Error("draw != amortized amount");
   console.log("PASS");

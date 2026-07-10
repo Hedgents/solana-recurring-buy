@@ -36,4 +36,8 @@ pub enum BuyError {
     PlanCompleted,
     #[msg("M2 INV-5: pot account is not the user's canonical target ATA")]
     BadPotAccount,
+    #[msg("Fee: fee account is not the destination's canonical ATA for the input mint")]
+    BadFeeAccount,
+    #[msg("Fee: exceeds the compiled-in MAX_FEE_BPS cap")]
+    FeeTooHigh,
 }

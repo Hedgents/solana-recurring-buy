@@ -36,10 +36,17 @@ const SYS = address("11111111111111111111111111111111");
 
 const PULL = 10_000_000n; // 10 USDC this period
 const CAP = 25_000_000n;  // per-period cap
-const MIN_OUT = 9_900_000n;
-const OUT = 10_000_000n;  // mock venue pays exactly this
 
 const rpc = createSolanaRpc("https://api.devnet.solana.com");
+const RB_FEE = async () => {
+  const { getProgramDerivedAddress, getUtf8Encoder } = await import("@solana/kit");
+  const [pda] = await getProgramDerivedAddress({ programAddress: address(F.recurringBuy), seeds: [getUtf8Encoder().encode("fee")] });
+  const info = await rpc.getAccountInfo(pda, { encoding: "base64" }).send();
+  if (!info.value) return { pda, bps: 0n, destination: null };
+  const d = Buffer.from(info.value.data[0], "base64");
+  const { getBase58Decoder } = await import("@solana/kit");
+  return { pda, bps: BigInt(d.readUInt16LE(8)), destination: getBase58Decoder().decode(d.subarray(10, 42)) };
+};
 const rpcSubscriptions = createSolanaRpcSubscriptions("wss://api.devnet.solana.com");
 const sendAndConfirm = sendAndConfirmTransactionFactory({ rpc, rpcSubscriptions });
 
@@ -105,8 +112,17 @@ async function main() {
     transferData: { amount: PULL, delegator: owner.address, mint: USDC },
   });
 
+  // Protocol fee: net-size the venue leg and pass the fee accounts.
+  const feeCfg = await RB_FEE();
+  const FEE = (PULL * feeCfg.bps) / 10_000n;
+  const NET = PULL - FEE;
+  const MIN_OUT = (NET * 99n) / 100n;
+  const { getProgramDerivedAddress: _g, getUtf8Encoder: _u } = await import("@solana/kit");
+  const { findAssociatedTokenPda } = await import("@solana-program/token");
+  const [feeAta] = await findAssociatedTokenPda({ owner: address(feeCfg.destination ?? keeper.address), mint: USDC, tokenProgram: TOKEN_PROGRAM_ADDRESS });
+
   // mock_swap.swap(amount_in, out_amount) -> its data + accounts become the router's swap leg.
-  const swapData = cat(disc(msIdl, "swap"), u64(PULL), u64(OUT));
+  const swapData = cat(disc(msIdl, "swap"), u64(NET), u64(NET));
   const swapAccts = [
     acc(F.transient, AccountRole.WRITABLE),        // source_usdc
     acc(F.buyAuthority, AccountRole.READONLY),     // source_authority (router forces signer in CPI)
@@ -130,6 +146,8 @@ async function main() {
       acc(F.dest, AccountRole.WRITABLE),
       acc(F.mockSwap, AccountRole.READONLY),            // swap_program
       acc(TOKEN_PROGRAM_ADDRESS, AccountRole.READONLY),
+      acc(feeCfg.pda, AccountRole.READONLY),
+      acc(feeAta, AccountRole.WRITABLE),
       ...swapAccts,                                     // remaining_accounts
     ],
     data: execData,

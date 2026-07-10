@@ -58,6 +58,14 @@ cd keeper/native && npm install && node e2e.mjs
 - [ ] Third-party audit, M1+M2 scope
 - [ ] Mainnet reference (PAXG, live Jupiter route) + front-end
 
+## Protocol fee
+
+An optional, **hard-capped** execution fee (max 1%, compiled in): a fixed percentage of each
+executed swap's input, skimmed pre-swap to a disclosed destination. It is an automation fee on
+FLOW — never a management fee on holdings, because nothing is ever held. The open-source
+reference default is **0**; an operated instance may enable it (`init_fee_config` / `set_fee`,
+admin-gated). The price floor protects the NET amount, so the fee can never hide inside slippage.
+
 ## Keeper daemon
 
 [`keeper/native/daemon.mjs`](./keeper/native/daemon.mjs) turns the rails into a running service: each tick it

@@ -105,6 +105,21 @@ async function fetchSellPlan(user) {
   };
 }
 
+const feeConfigPda = async () =>
+  (await getProgramDerivedAddress({
+    programAddress: RB, seeds: [getUtf8Encoder().encode("fee")],
+  }))[0];
+
+async function loadFeeConfig() {
+  const pda = await feeConfigPda();
+  const info = await rpc.getAccountInfo(pda, { encoding: "base64" }).send();
+  if (!info.value) return { pda, bps: 0n, destination: null };
+  const d = Buffer.from(info.value.data[0], "base64");
+  const { getBase58Decoder } = await import("@solana/kit");
+  const destination = getBase58Decoder().decode(d.subarray(10, 42));
+  return { pda, bps: BigInt(d.readUInt16LE(8)), destination };
+}
+
 /** Pullable amount for a delegation right now (lazy period roll). */
 function available(del, now) {
   const d = del.data;
@@ -139,7 +154,7 @@ function mockSwapIx(source, sourceAuth, poolIn, poolOut, dest, amountIn, out) {
 
 const floorOut = (amountIn) => (amountIn * (10_000n - SLIPPAGE_BPS)) / 10_000n; // $1 ref, 6dp both sides
 
-async function crankBuy(keeper, del, now, eventAuthority) {
+async function crankBuy(keeper, del, now, eventAuthority, feeCfg) {
   const user = del.data.header.delegator;
   const avail = available(del, now);
   if (avail <= 0n) return log(`buy  ${user.slice(0, 6)}: nothing available this period`);
@@ -152,14 +167,17 @@ async function crankBuy(keeper, del, now, eventAuthority) {
 
   const residue = await bal(transient);
   const amountIn = avail + residue;
-  const minOut = floorOut(amountIn);
+  const fee = (amountIn * feeCfg.bps) / 10_000n;
+  const net = amountIn - fee;
+  const minOut = floorOut(net);
+  const feeAta = await ata(feeCfg.destination ?? keeper.address, USDC);
 
   const ixs = [
     getCreateAssociatedTokenIdempotentInstruction({ payer: keeper, ata: transient, owner: buyAuth, mint: address(USDC), tokenProgram: TOKEN_PROGRAM_ADDRESS }),
     getCreateAssociatedTokenIdempotentInstruction({ payer: keeper, ata: dest, owner: address(user), mint: address(TARGET), tokenProgram: TOKEN_PROGRAM_ADDRESS }),
     pullIx(del, keeper, userUsdc, transient, avail, saPda, eventAuthority, USDC),
   ];
-  const swap = mockSwapIx(transient, buyAuth, F.poolUsdc, F.poolTarget, dest, amountIn, amountIn);
+  const swap = mockSwapIx(transient, buyAuth, F.poolUsdc, F.poolTarget, dest, net, net);
   const execData = cat(disc(rbIdl, "execute_buy"), u64(minOut), u32(swap.data.length), swap.data);
   ixs.push({
     programAddress: RB,
@@ -168,15 +186,16 @@ async function crankBuy(keeper, del, now, eventAuthority) {
       acc(user, AccountRole.READONLY), acc(buyAuth, AccountRole.READONLY),
       acc(transient, AccountRole.WRITABLE), acc(dest, AccountRole.WRITABLE),
       acc(MS, AccountRole.READONLY), acc(TOKEN_PROGRAM_ADDRESS, AccountRole.READONLY),
+      acc(feeCfg.pda, AccountRole.READONLY), acc(feeAta, AccountRole.WRITABLE),
       ...swap.accounts,
     ],
     data: execData,
   });
   const sig = await sendTx(keeper, ixs);
-  log(`buy  ${user.slice(0, 6)}: pulled ${avail} uUSDC -> bought (tx ${sig.slice(0, 16)}…)`);
+  log(`buy  ${user.slice(0, 6)}: pulled ${avail} uUSDC (fee ${fee}) -> bought (tx ${sig.slice(0, 16)}…)`);
 }
 
-async function crankSell(keeper, del, now, eventAuthority) {
+async function crankSell(keeper, del, now, eventAuthority, feeCfg) {
   const user = del.data.header.delegator;
   const plan = await fetchSellPlan(user);
   if (!plan) return log(`sell ${user.slice(0, 6)}: delegation but no SellPlan — skip`);
@@ -199,13 +218,16 @@ async function crankSell(keeper, del, now, eventAuthority) {
   if (pull <= 0n && residue <= 0n) return log(`sell ${user.slice(0, 6)}: nothing to draw (pot ${pot}, avail ${avail})`);
 
   const amountIn = pull + residue;
-  const minOut = floorOut(amountIn);
+  const fee = (amountIn * feeCfg.bps) / 10_000n;
+  const net = amountIn - fee;
+  const minOut = floorOut(net);
+  const feeAta = await ata(feeCfg.destination ?? keeper.address, TARGET);
   const ixs = [
     getCreateAssociatedTokenIdempotentInstruction({ payer: keeper, ata: transient, owner: buyAuth, mint: address(TARGET), tokenProgram: TOKEN_PROGRAM_ADDRESS }),
     getCreateAssociatedTokenIdempotentInstruction({ payer: keeper, ata: destUsdc, owner: address(user), mint: address(USDC), tokenProgram: TOKEN_PROGRAM_ADDRESS }),
   ];
   if (pull > 0n) ixs.push(pullIx(del, keeper, userTarget, transient, pull, saPda, eventAuthority, TARGET));
-  const swap = mockSwapIx(transient, buyAuth, F.poolTarget, F.poolUsdc, destUsdc, amountIn, amountIn);
+  const swap = mockSwapIx(transient, buyAuth, F.poolTarget, F.poolUsdc, destUsdc, net, net);
   const execData = cat(disc(rbIdl, "execute_sell"), u64(minOut), u32(swap.data.length), swap.data);
   ixs.push({
     programAddress: RB,
@@ -215,16 +237,18 @@ async function crankSell(keeper, del, now, eventAuthority) {
       acc(buyAuth, AccountRole.READONLY), acc(transient, AccountRole.WRITABLE),
       acc(userTarget, AccountRole.READONLY), acc(destUsdc, AccountRole.WRITABLE),
       acc(MS, AccountRole.READONLY), acc(TOKEN_PROGRAM_ADDRESS, AccountRole.READONLY),
+      acc(feeCfg.pda, AccountRole.READONLY), acc(feeAta, AccountRole.WRITABLE),
       ...swap.accounts,
     ],
     data: execData,
   });
   const sig = await sendTx(keeper, ixs);
-  log(`sell ${user.slice(0, 6)}: drew ${pull} target -> USDC (tx ${sig.slice(0, 16)}…)`);
+  log(`sell ${user.slice(0, 6)}: drew ${pull} target (fee ${fee}) -> USDC (tx ${sig.slice(0, 16)}…)`);
 }
 
 async function tick(keeper, eventAuthority) {
   const now = await chainNow();
+  const feeCfg = await loadFeeConfig();
   const dels = await fetchDelegationsByDelegatee(rpc, keeper.address);
   // Latest-expiry delegation per (delegator, mint); ignore foreign mints.
   const best = new Map();
@@ -239,8 +263,8 @@ async function tick(keeper, eventAuthority) {
   for (const d of best.values()) {
     const isBuy = d.data.mint.toString() === USDC;
     try {
-      if (isBuy) await crankBuy(keeper, d, now, eventAuthority);
-      else await crankSell(keeper, d, now, eventAuthority);
+      if (isBuy) await crankBuy(keeper, d, now, eventAuthority, feeCfg);
+      else await crankSell(keeper, d, now, eventAuthority, feeCfg);
     } catch (e) {
       log(`${isBuy ? "buy " : "sell"} ${d.data.header.delegator.slice(0, 6)}: ERROR ${String(e.message ?? e).slice(0, 180)}`);
     }

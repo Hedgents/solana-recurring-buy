@@ -1,5 +1,20 @@
 # Internal audit — findings & resolutions
 
+## Round 3: protocol fee addition (2026-07-10, self-review)
+
+Scope: `FeeConfig` (+`init_fee_config`/`set_fee`), the pre-swap skim in both execute paths.
+Reviewed inline (not a full external pass — fold into the third-party audit scope):
+- **Cap is compiled in** (`MAX_FEE_BPS = 100`); an admin cannot exceed 1% of flow. Changing the
+  destination only moves where the bounded fee goes — INV-5 (no admin path to user funds) holds
+  in the sense that admin reach is bounded to <=1% of authorized flow, now explicitly disclosed.
+- **Fee rounds DOWN** (favors the user); floor + `min_out` protect the NET amount, so a keeper
+  cannot launder extra spread through the fee; `fee_ata` is bound to the destination's canonical
+  ATA for the INPUT mint (`BadFeeAccount`); skim happens under the transient PDA signature
+  before the venue CPI; drain-to-zero still enforced after.
+- Tests: buy-side skim, sell-side in-kind skim, cap + admin gating, non-canonical fee account.
+  27/27 localnet + devnet daemon tick with 50 bps live (fee 20,000 on a 4M sell, 125,000 on a
+  25M buy — both exact).
+
 ## Round 2: M2 decumulation additions (2026-07-10)
 
 Independent internal review of the M2 additions (`SellPlan`, `open_sell_plan`, `close_sell_plan`, `execute_sell`, `sell_floor`, keeper sell leg, M2 tests) against `SPEC_M2_DECUMULATION.md`. One in-depth reviewer (a second, adversarially-framed reviewer was blocked by a policy filter; the completed review covered the security-relevant surface: account constraints, stale-safety, clock/cap math, cross-instruction composition). M1 findings were not re-opened.

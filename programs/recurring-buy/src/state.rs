@@ -6,6 +6,11 @@ pub const MAX_SWAP_PROGRAMS: usize = 3;
 pub const CONFIG_SEED: &[u8] = b"config";
 pub const BUY_AUTH_SEED: &[u8] = b"buy";
 pub const SELL_PLAN_SEED: &[u8] = b"sell-plan";
+pub const FEE_CONFIG_SEED: &[u8] = b"fee";
+
+/// Hard cap on the protocol execution fee. An admin can NEVER set more than
+/// 1% of flow; the cap is compiled in, not a parameter.
+pub const MAX_FEE_BPS: u16 = 100;
 
 /// Cadence bounds for a sell plan: 1 minute (test-friendly) to 1 year.
 pub const MIN_PERIOD_SECS: i64 = 60;
@@ -42,6 +47,22 @@ impl Config {
     pub fn is_whitelisted(&self, program_id: &Pubkey) -> bool {
         self.swap_programs[..self.swap_program_count as usize].contains(program_id)
     }
+}
+
+/// Protocol execution fee (the Uniswap-Labs-style interface-fee model): a
+/// FIXED, disclosed, product- and counterparty-agnostic percentage of each
+/// executed swap's INPUT, skimmed pre-swap to the destination's canonical ATA.
+/// It is an automation/execution fee on FLOW, never a management fee on
+/// holdings (nothing is ever held). Default 0 — the open-source reference
+/// deployment is free; an operated instance may turn it on up to MAX_FEE_BPS.
+#[account]
+#[derive(InitSpace)]
+pub struct FeeConfig {
+    /// Fee in basis points of each execution's input amount. <= MAX_FEE_BPS.
+    pub fee_bps: u16,
+    /// Wallet whose canonical ATAs receive the fee (USDC on buys, target on sells).
+    pub destination: Pubkey,
+    pub bump: u8,
 }
 
 /// M2 decumulation: a per-user amortized sell schedule (SPEC_M2 §4). Holds
