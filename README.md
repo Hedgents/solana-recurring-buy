@@ -58,14 +58,6 @@ cd keeper/native && npm install && node e2e.mjs
 - [ ] Third-party audit, M1+M2 scope
 - [ ] Mainnet reference (PAXG, live Jupiter route) + front-end
 
-## License
-
-Dual-licensed under either [MIT](./LICENSE-MIT) or [Apache-2.0](./LICENSE-APACHE), at your option.
-
----
-
-*This is infrastructure, not financial advice, and not a securities or custody solution by itself. Anyone deploying it is responsible for their own legal and regulatory posture.*
-
 ## Keeper daemon
 
 [`keeper/native/daemon.mjs`](./keeper/native/daemon.mjs) turns the rails into a running service: each tick it
@@ -82,3 +74,11 @@ INTERVAL_S=60 node keeper/native/daemon.mjs
 [`keeper/native/golden.mjs`](./keeper/native/golden.mjs) dumps byte-exact golden vectors for the three
 native instructions so alternative encoders (e.g. a web3.js-v1 browser flow) can be verified against
 the audited kit client.
+
+## License
+
+Dual-licensed under either [MIT](./LICENSE-MIT) or [Apache-2.0](./LICENSE-APACHE), at your option.
+
+---
+
+*This is infrastructure, not financial advice, and not a securities or custody solution by itself. Anyone deploying it is responsible for their own legal and regulatory posture.*
