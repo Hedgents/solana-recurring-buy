@@ -1,4 +1,24 @@
-# Internal audit — findings & resolutions (2026-07-09)
+# Internal audit — findings & resolutions
+
+## Round 2: M2 decumulation additions (2026-07-10)
+
+Independent internal review of the M2 additions (`SellPlan`, `open_sell_plan`, `close_sell_plan`, `execute_sell`, `sell_floor`, keeper sell leg, M2 tests) against `SPEC_M2_DECUMULATION.md`. One in-depth reviewer (a second, adversarially-framed reviewer was blocked by a policy filter; the completed review covered the security-relevant surface: account constraints, stale-safety, clock/cap math, cross-instruction composition). M1 findings were not re-opened.
+
+| # | Severity | Issue | Status |
+|---|----------|-------|--------|
+| M2-1 | Medium | **No terminal state after `end_ts`.** `remaining_periods` floors at 1, so a post-horizon plan silently became a perpetual "sell the full (possibly re-accumulated) pot every period" license until the user closed the plan or revoked the delegation. | **FIXED**: every due period `≤ end_ts` gets exactly one crank; once `next_due_ts > end_ts`, `execute_sell` refuses forever (`PlanCompleted`, checked before the clock gate). Spec §6.8 added. |
+| M2-2 | Medium | **Tests only half-mirrored M1** on the sell path, and the amortization-cap boundary was fuzzed (periods ∈ {9,10}), never pinned. | **FIXED**: added the full sell-side mirror (INV-1 wrong destination, INV-3 residue, INV-4 venue, slippage-underpay, pause, non-canonical pot) + an exact cap/cap+1 boundary pair + a lifecycle test (k-jump advance, NotDue, late final crank, `PlanCompleted`). 23/23 localnet. |
+| M2-3 | Low | `init_config` never checked the quote mint's decimals; a non-6dp quote mint would mis-scale both floors ~1000x. | **FIXED**: `require!(usdc_mint.decimals == 6)` at init. |
+| M2-4 | Low | Spec §6.6 text said `next_due_ts += period_secs`; the code (correctly) does the k-jump past `now`. Doc drift an auditor would flag. | **FIXED**: spec updated to the k-jump formula + rationale; `next_due_ts = now` at open documented. |
+| M2-5 | Low | Keeper `amortizedDraw` ignored pre-existing transient residue (could compose a tx exceeding the on-chain cap) and its doc overstated itself; keeper/e2e computed periods from the **local** clock (boundary-skew `OverdrawSchedule` liveness race). | **FIXED**: residue-aware draw (`cap − residue`, floored at 0) + chain-time (`getBlockTime`) in the e2e + doc guidance. |
+| M2-6 | Nit | Non-canonical pot account rejected with generic `BadParam`; the pot binding (what makes INV-5 sound) was undocumented in the spec. | **FIXED**: dedicated `BadPotAccount` + spec §6.5 documents the binding. |
+| — | Info | Confirmed sound: cap formula matches spec §6.5 exactly (incl. `max(1)` and pot-includes-this-pull accounting, stale-safe by instruction-entry deserialization); k-jump arithmetic (signedness, `now == next_due` edge, checked ops); account structs complete (`INIT_SPACE` exact, `close = user`, seeds/bumps); keeper and on-chain math agree bit-for-bit under a shared clock; `sell_floor` units/rounding correct and consistent with `price_floor`. | — |
+
+Residual (documented, mainnet-gated, unchanged from M1): instruction-sysvar binding of the pull, Pyth reference price, multisig admin, live venue route; plus the SPEC_M2 dust-guard open question (malicious-keeper dust cranks are a liveness annoyance, not theft — the user can always self-crank or revoke).
+
+Post-remediation status: 8/8 Rust unit, 23/23 localnet, devnet sell e2e PASS on the upgraded program (real target-mint delegation, draw == pot/periods exactly).
+
+## Round 1: M1 (2026-07-09)
 
 Independent multi-reviewer audit of the M1 deliverable, run before any grant submission. Three parallel reviews: (A) adversarial security red-team of the on-chain program, (B) correctness + code-quality, (C) repo hygiene + grant-readiness. This is an **internal** review, not a substitute for a third-party audit (that is a funded milestone, see README).
 

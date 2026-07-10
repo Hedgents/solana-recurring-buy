@@ -400,6 +400,165 @@ describe("recurring-buy: non-custodial recurring buy invariants", () => {
       }
     });
 
+    it("M2 INV-5 pinned: exactly cap passes, cap+1 reverts (10 periods, 55s slack)", async () => {
+      // total pot 100e6, 10 periods -> cap exactly 10_000_000 while <55s elapse
+      const openSlack = async (r: any) => {
+        const now = Math.floor(Date.now() / 1000);
+        await rb.methods
+          .openSellPlan(new anchor.BN(now + 10 * PERIOD + 55), new anchor.BN(PERIOD))
+          .accountsPartial({ user: r.user.publicKey, sellPlan: r.plan })
+          .signers([r.user]).rpc();
+      };
+      const a = await newRetiree(90_000_000, 10_000_000); // pull == cap
+      await openSlack(a);
+      await executeSell(a, 9_900_000, await buildSellSwap(a, 10_000_000, 10_000_000));
+      assert.equal(await bal(a.destUsdc), 10_000_000, "exact-cap pull succeeds");
+
+      const b = await newRetiree(89_999_999, 10_000_001); // pull == cap + 1
+      await openSlack(b);
+      try {
+        await executeSell(b, 9_900_000, await buildSellSwap(b, 10_000_001, 10_000_001));
+        assert.fail("should have reverted");
+      } catch (e: any) {
+        assert.equal(e.error?.errorCode?.code, "OverdrawSchedule");
+      }
+    });
+
+    it("M2 INV-1: rejects proceeds destined to a non-owner USDC account", async () => {
+      const r = await newRetiree(90_000_000, 10_000_000);
+      await openPlan(r, 10);
+      const attacker = Keypair.generate();
+      const attackerUsdc = await createAta(usdcMint, attacker.publicKey);
+      const swap = await buildSellSwap({ ...r, destUsdc: attackerUsdc }, 10_000_000, 10_000_000);
+      try {
+        await rb.methods
+          .executeSell(new anchor.BN(9_900_000), swap.data)
+          .accounts({
+            keeper: payer.publicKey, config, user: r.user.publicKey, sellPlan: r.plan,
+            buyAuthority: r.buyAuth, transientTarget: r.transientTarget,
+            userTargetAta: r.userTarget, destUsdc: attackerUsdc,
+            swapProgram: ms.programId, tokenProgram: TOKEN_PROGRAM_ID,
+          })
+          .remainingAccounts(swap.keys).rpc();
+        assert.fail("should have reverted");
+      } catch (e: any) {
+        assert.equal(e.error?.errorCode?.code, "DestinationNotOwner");
+      }
+    });
+
+    it("M2 INV-3: rejects when the sell leaves residue in the transient", async () => {
+      const r = await newRetiree(90_000_000, 10_000_000);
+      await openPlan(r, 10);
+      const swap = await buildSellSwap(r, 6_000_000, 10_000_000); // swaps only 6 of 10
+      try {
+        await executeSell(r, 9_900_000, swap);
+        assert.fail("should have reverted");
+      } catch (e: any) {
+        assert.equal(e.error?.errorCode?.code, "TransientNotDrained");
+      }
+    });
+
+    it("M2 INV-4: rejects a non-whitelisted venue on the sell path", async () => {
+      const r = await newRetiree(90_000_000, 10_000_000);
+      await openPlan(r, 10);
+      const swap = await buildSellSwap(r, 10_000_000, 10_000_000);
+      try {
+        await rb.methods
+          .executeSell(new anchor.BN(9_900_000), swap.data)
+          .accounts({
+            keeper: payer.publicKey, config, user: r.user.publicKey, sellPlan: r.plan,
+            buyAuthority: r.buyAuth, transientTarget: r.transientTarget,
+            userTargetAta: r.userTarget, destUsdc: r.destUsdc,
+            swapProgram: Keypair.generate().publicKey, tokenProgram: TOKEN_PROGRAM_ID,
+          })
+          .remainingAccounts(swap.keys).rpc();
+        assert.fail("should have reverted");
+      } catch (e: any) {
+        assert.equal(e.error?.errorCode?.code, "VenueNotWhitelisted");
+      }
+    });
+
+    it("M2 INV-2: rejects when realized USDC is below min_out (venue underpays)", async () => {
+      const r = await newRetiree(90_000_000, 10_000_000);
+      await openPlan(r, 10);
+      const swap = await buildSellSwap(r, 10_000_000, 9_000_000); // underpays
+      try {
+        await executeSell(r, 9_900_000, swap);
+        assert.fail("should have reverted");
+      } catch (e: any) {
+        assert.equal(e.error?.errorCode?.code, "SlippageExceeded");
+      }
+      assert.equal(await bal(r.destUsdc), 0, "no delivery on revert (atomic)");
+    });
+
+    it("M2 INV-5: rejects a non-canonical pot account (BadPotAccount)", async () => {
+      const r = await newRetiree(90_000_000, 10_000_000);
+      await openPlan(r, 10);
+      const swap = await buildSellSwap(r, 10_000_000, 10_000_000);
+      try {
+        await rb.methods
+          .executeSell(new anchor.BN(9_900_000), swap.data)
+          .accounts({
+            keeper: payer.publicKey, config, user: r.user.publicKey, sellPlan: r.plan,
+            buyAuthority: r.buyAuth, transientTarget: r.transientTarget,
+            userTargetAta: r.transientTarget, // not the user's canonical target ATA
+            destUsdc: r.destUsdc,
+            swapProgram: ms.programId, tokenProgram: TOKEN_PROGRAM_ID,
+          })
+          .remainingAccounts(swap.keys).rpc();
+        assert.fail("should have reverted");
+      } catch (e: any) {
+        assert.equal(e.error?.errorCode?.code, "BadPotAccount");
+      }
+    });
+
+    it("pause halts execute_sell too", async () => {
+      await rb.methods.setPause(true).accounts({ admin: payer.publicKey, config }).rpc();
+      const r = await newRetiree(90_000_000, 10_000_000);
+      await openPlan(r, 10);
+      const swap = await buildSellSwap(r, 10_000_000, 10_000_000);
+      try {
+        await executeSell(r, 9_900_000, swap);
+        assert.fail("should have reverted");
+      } catch (e: any) {
+        assert.equal(e.error?.errorCode?.code, "Paused");
+      }
+      await rb.methods.setPause(false).accounts({ admin: payer.publicKey, config }).rpc();
+    });
+
+    it("M2 lifecycle: k-jump advance, late final crank, then PlanCompleted (62s)", async function () {
+      this.timeout(120_000);
+      // Minimum-horizon plan: one due period + a served-late tail, then terminal.
+      const r = await newRetiree(0, 10_000_000); // whole pot sits in the transient
+      await openPlan(r, 1); // end = now + 65s, period 60s
+      await executeSell(r, 9_900_000, await buildSellSwap(r, 10_000_000, 10_000_000));
+      assert.equal(await bal(r.destUsdc), 10_000_000, "crank 1 (full pot, 1 period)");
+
+      // Same period again -> NotDue (not yet terminal: next_due <= end).
+      await mintTo(connection, payer, targetMint, r.transientTarget, payer, 1_000_000);
+      try {
+        await executeSell(r, 990_000, await buildSellSwap(r, 1_000_000, 1_000_000));
+        assert.fail("should have reverted");
+      } catch (e: any) {
+        assert.equal(e.error?.errorCode?.code, "NotDue");
+      }
+
+      await new Promise((res) => setTimeout(res, 62_000));
+
+      // Final due period, served late: succeeds and advances past end_ts.
+      await executeSell(r, 990_000, await buildSellSwap(r, 1_000_000, 1_000_000));
+      assert.equal(await bal(r.destUsdc), 11_000_000, "late final crank served");
+
+      // Schedule complete: the automation refuses forever.
+      await mintTo(connection, payer, targetMint, r.transientTarget, payer, 1_000_000);
+      try {
+        await executeSell(r, 990_000, await buildSellSwap(r, 1_000_000, 1_000_000));
+        assert.fail("should have reverted");
+      } catch (e: any) {
+        assert.equal(e.error?.errorCode?.code, "PlanCompleted");
+      }
+    });
+
     it("open rejects a sub-minimum period; close returns rent to the owner", async () => {
       const r = await newRetiree(0, 0);
       const now = Math.floor(Date.now() / 1000);

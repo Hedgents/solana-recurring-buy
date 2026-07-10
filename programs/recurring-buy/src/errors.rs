@@ -32,4 +32,8 @@ pub enum BuyError {
     NotDue,
     #[msg("M2 INV-5: pull exceeds the amortized schedule cap")]
     OverdrawSchedule,
+    #[msg("M2: the schedule has completed (every due period has been served)")]
+    PlanCompleted,
+    #[msg("M2 INV-5: pot account is not the user's canonical target ATA")]
+    BadPotAccount,
 }

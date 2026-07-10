@@ -144,14 +144,28 @@ export class RecurringBuyKeeper {
   }
 
   /**
-   * The amortized draw for this period: `(wallet + alreadyPulled) / periodsLeft`
-   * in target base units — mirrors the on-chain cap so the keeper pulls exactly
-   * what `execute_sell` will accept.
+   * The PULL to request this period, mirroring the on-chain cap
+   * `amount_in <= (wallet + amount_in) / periodsLeft` where `amount_in` is the
+   * FULL transient balance (any pre-existing residue counts against the cap,
+   * so it is subtracted from the pull).
+   *
+   * `nowTs` should be CHAIN time (e.g. getBlockTime), not the local clock:
+   * near a period boundary local-vs-validator skew can make the keeper compute
+   * one fewer period than the program and get an OverdrawSchedule revert
+   * (liveness only, but avoidable).
    */
-  amortizedDraw(args: { walletBalance: bigint; endTs: number; periodSecs: number; nowTs: number }): bigint {
+  amortizedDraw(args: {
+    walletBalance: bigint;
+    endTs: number;
+    periodSecs: number;
+    nowTs: number;
+    transientResidue?: bigint;
+  }): bigint {
+    const residue = args.transientResidue ?? 0n;
     const remaining = Math.max(args.endTs - args.nowTs, 0);
     const periods = BigInt(Math.max(Math.floor(remaining / args.periodSecs), 1));
-    return args.walletBalance / periods;
+    const cap = (args.walletBalance + residue) / periods;
+    return cap > residue ? cap - residue : 0n;
   }
 
   /** The router's execute_sell: forwards `swap` under the transient PDA signature and verifies the outcome. */

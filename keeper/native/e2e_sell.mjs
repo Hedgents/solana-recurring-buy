@@ -66,9 +66,12 @@ async function main() {
   const owner = keeper;
   const TARGET = address(F.targetMint);
 
-  // Amortized draw, mirroring the on-chain cap: pot / periods_left.
+  // Amortized draw, mirroring the on-chain cap: pot / periods_left. Use CHAIN
+  // time (not the local clock) so a period-boundary skew cannot make us compute
+  // fewer periods than the program and trip OverdrawSchedule.
   const pot = await tokenBal(F.userTargetAta);
-  const now = Math.floor(Date.now() / 1000);
+  const slot = await rpc.getSlot({ commitment: "confirmed" }).send();
+  const now = Number(await rpc.getBlockTime(slot).send());
   const periods = BigInt(Math.max(Math.floor((F.sellEndTs - now) / F.sellPeriodSecs), 1));
   const DRAW = pot / periods;
   const MIN_OUT = (DRAW * 99n) / 100n; // $1 ref, 1% slippage band

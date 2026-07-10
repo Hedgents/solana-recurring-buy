@@ -41,6 +41,9 @@ pub mod recurring_buy {
         // Bound target decimals so the u128 floor math cannot overflow-revert a
         // legitimate buy (10^decimals * amount_in). SPL mints are <= 9 in practice.
         require!(ctx.accounts.target_mint.decimals <= 12, BuyError::BadParam);
+        // Both floors assume a 6-decimal quote mint (micro-USD cancels USDC's
+        // 1e6). A different-decimal quote would silently mis-scale the floors.
+        require!(ctx.accounts.usdc_mint.decimals == 6, BuyError::BadParam);
         let cfg = &mut ctx.accounts.config;
         cfg.admin = ctx.accounts.admin.key();
         cfg.target_mint = ctx.accounts.target_mint.key();
@@ -234,6 +237,16 @@ pub mod recurring_buy {
         let cfg = &ctx.accounts.config;
         require!(!cfg.paused, BuyError::Paused);
 
+        // Terminal state (M2 INV-8): every due period ≤ end_ts gets exactly one
+        // crank; once next_due_ts has advanced past end_ts the schedule is
+        // complete and the automation stops (the user still owns everything —
+        // funds never left their wallet). Checked BEFORE the clock gate so the
+        // terminal state reports correctly.
+        require!(
+            ctx.accounts.sell_plan.next_due_ts <= ctx.accounts.sell_plan.end_ts,
+            BuyError::PlanCompleted
+        );
+
         // Clock gate (M2 INV-6).
         let now = Clock::get()?.unix_timestamp;
         require!(now >= ctx.accounts.sell_plan.next_due_ts, BuyError::NotDue);
@@ -255,7 +268,7 @@ pub mod recurring_buy {
         require_keys_eq!(
             ctx.accounts.user_target_ata.key(),
             get_associated_token_address(&ctx.accounts.user.key(), &cfg.target_mint),
-            BuyError::BadParam
+            BuyError::BadPotAccount
         );
 
         let amount_in = ctx.accounts.transient_target.amount;

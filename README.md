@@ -48,13 +48,13 @@ cd keeper/native && npm install && node e2e.mjs
 
 - [x] Design spec
 - [x] `execute_buy` router + all five non-custody invariants
-- [x] Localnet invariant test suite (7/7 passing, deterministic mock venue)
+- [x] Localnet invariant test suite (23/23 passing incl. M2, deterministic mock venue)
 - [x] Keeper (composes native pull + swap route + `execute_buy`)
 - [x] Devnet e2e: **real** native Subscriptions pull + router, atomic, one tx ([`keeper/native/e2e.mjs`](./keeper/native/e2e.mjs)) — *mock venue; the live Jupiter route is the open mainnet item ([SPEC §11.2](./SPEC.md))*
 - [x] M2 design spec: amortized non-custodial decumulation ([`SPEC_M2_DECUMULATION.md`](./SPEC_M2_DECUMULATION.md))
 - [x] M2 build: `SellPlan` + `execute_sell` (fixed-unit amortized draws, exact runway) + keeper sell leg
 - [x] M2 devnet e2e: real native pull **on the target mint** + amortized sell, atomic, one tx ([`keeper/native/e2e_sell.mjs`](./keeper/native/e2e_sell.mjs)) — *mock venue, same caveat as M1*
-- [ ] Internal red-team of the M2 additions (M1-style; M1's internal audit: [`AUDIT.md`](./AUDIT.md))
+- [x] Internal red-team of the M2 additions (findings fixed: [`AUDIT.md`](./AUDIT.md) round 2)
 - [ ] Third-party audit, M1+M2 scope
 - [ ] Mainnet reference (PAXG, live Jupiter route) + front-end
 
