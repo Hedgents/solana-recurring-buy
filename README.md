@@ -65,3 +65,20 @@ Dual-licensed under either [MIT](./LICENSE-MIT) or [Apache-2.0](./LICENSE-APACHE
 ---
 
 *This is infrastructure, not financial advice, and not a securities or custody solution by itself. Anyone deploying it is responsible for their own legal and regulatory posture.*
+
+## Keeper daemon
+
+[`keeper/native/daemon.mjs`](./keeper/native/daemon.mjs) turns the rails into a running service: each tick it
+discovers every recurring delegation naming the keeper as delegatee (via `fetchDelegationsByDelegatee`),
+and cranks whatever is due — USDC delegations become atomic `[pull, swap, execute_buy]`, target-mint
+delegations with a due `SellPlan` become atomic `[pull, swap, execute_sell]` (amortized draw mirrored
+off chain state). One tick, one keeper, any number of users; a failed item never kills the tick.
+
+```bash
+node keeper/native/daemon.mjs --once   # single tick
+INTERVAL_S=60 node keeper/native/daemon.mjs
+```
+
+[`keeper/native/golden.mjs`](./keeper/native/golden.mjs) dumps byte-exact golden vectors for the three
+native instructions so alternative encoders (e.g. a web3.js-v1 browser flow) can be verified against
+the audited kit client.
