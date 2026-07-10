@@ -42,6 +42,7 @@ export const SUBSCRIPTIONS_PROGRAM = new PublicKey(
 
 const CONFIG_SEED = Buffer.from("config");
 const BUY_AUTH_SEED = Buffer.from("buy");
+const SELL_PLAN_SEED = Buffer.from("sell-plan");
 
 export interface SwapLeg {
   /** The whitelisted venue program to CPI. */
@@ -108,6 +109,69 @@ export class RecurringBuyKeeper {
         buyAuthority: this.buyAuthority(args.user),
         transientUsdc: this.transientUsdc(args.user),
         destAta: this.destAta(args.user),
+        swapProgram: args.swap.program,
+        tokenProgram: TOKEN_PROGRAM_ID,
+      })
+      .remainingAccounts(args.swap.keys)
+      .instruction();
+  }
+
+  // ── M2: decumulation (sell side) ──────────────────────────────────────
+
+  /** The user's amortized sell schedule PDA. */
+  sellPlan(user: PublicKey): PublicKey {
+    return PublicKey.findProgramAddressSync([SELL_PLAN_SEED, user.toBuffer()], this.program.programId)[0];
+  }
+
+  /** The transient TARGET-asset account the sell-side native pull deposits into. */
+  transientTarget(user: PublicKey): PublicKey {
+    return getAssociatedTokenAddressSync(this.targetMint, this.buyAuthority(user), true);
+  }
+
+  /** The user's own USDC ATA: the only allowed destination for sell proceeds. */
+  destUsdc(user: PublicKey): PublicKey {
+    return getAssociatedTokenAddressSync(this.usdcMint, user);
+  }
+
+  /** Idempotently create the sell-side transient target ATA (payer = keeper). */
+  ensureTransientTargetIx(user: PublicKey, payer: PublicKey): TransactionInstruction {
+    return createAssociatedTokenAccountIdempotentInstruction(
+      payer,
+      this.transientTarget(user),
+      this.buyAuthority(user),
+      this.targetMint
+    );
+  }
+
+  /**
+   * The amortized draw for this period: `(wallet + alreadyPulled) / periodsLeft`
+   * in target base units — mirrors the on-chain cap so the keeper pulls exactly
+   * what `execute_sell` will accept.
+   */
+  amortizedDraw(args: { walletBalance: bigint; endTs: number; periodSecs: number; nowTs: number }): bigint {
+    const remaining = Math.max(args.endTs - args.nowTs, 0);
+    const periods = BigInt(Math.max(Math.floor(remaining / args.periodSecs), 1));
+    return args.walletBalance / periods;
+  }
+
+  /** The router's execute_sell: forwards `swap` under the transient PDA signature and verifies the outcome. */
+  async buildExecuteSell(args: {
+    user: PublicKey;
+    keeper: PublicKey;
+    minOut: anchor.BN;
+    swap: SwapLeg;
+  }): Promise<TransactionInstruction> {
+    return this.program.methods
+      .executeSell(args.minOut, args.swap.data)
+      .accounts({
+        keeper: args.keeper,
+        config: this.config,
+        user: args.user,
+        sellPlan: this.sellPlan(args.user),
+        buyAuthority: this.buyAuthority(args.user),
+        transientTarget: this.transientTarget(args.user),
+        userTargetAta: getAssociatedTokenAddressSync(this.targetMint, args.user),
+        destUsdc: this.destUsdc(args.user),
         swapProgram: args.swap.program,
         tokenProgram: TOKEN_PROGRAM_ID,
       })

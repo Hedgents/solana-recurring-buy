@@ -269,4 +269,158 @@ describe("recurring-buy: non-custodial recurring buy invariants", () => {
     }
     await rb.methods.setPause(false).accounts({ admin: payer.publicKey, config }).rpc();
   });
+
+  describe("M2: amortized decumulation (execute_sell)", () => {
+    const SELL_PLAN_SEED = Buffer.from("sell-plan");
+    const PERIOD = 60; // MIN_PERIOD_SECS
+    const sellPlanPda = (user: PublicKey) =>
+      PublicKey.findProgramAddressSync([SELL_PLAN_SEED, user.toBuffer()], rb.programId)[0];
+
+    // A retiree: pot of target tokens in their own ATA, a transient target ATA
+    // (the native pull's sink), and a USDC ATA for proceeds.
+    async function newRetiree(potTarget: number, pulledTarget: number) {
+      const user = Keypair.generate();
+      const buyAuth = buyAuthPda(user.publicKey);
+      const transientTarget = await createAta(targetMint, buyAuth, true);
+      const userTarget = await createAta(targetMint, user.publicKey);
+      const destUsdc = await createAta(usdcMint, user.publicKey);
+      if (potTarget > 0) await mintTo(connection, payer, targetMint, userTarget, payer, potTarget);
+      if (pulledTarget > 0) await mintTo(connection, payer, targetMint, transientTarget, payer, pulledTarget);
+      // fund the user so they can sign open/close
+      await provider.sendAndConfirm(
+        new Transaction().add(
+          anchor.web3.SystemProgram.transfer({
+            fromPubkey: payer.publicKey, toPubkey: user.publicKey, lamports: 100_000_000,
+          })
+        ), []);
+      return { user, buyAuth, transientTarget, userTarget, destUsdc, plan: sellPlanPda(user.publicKey) };
+    }
+
+    async function openPlan(r: any, periods: number) {
+      const now = Math.floor(Date.now() / 1000);
+      await rb.methods
+        .openSellPlan(new anchor.BN(now + periods * PERIOD + 5), new anchor.BN(PERIOD))
+        .accountsPartial({ user: r.user.publicKey, sellPlan: r.plan })
+        .signers([r.user])
+        .rpc();
+    }
+
+    // The mock venue reversed: source = transient TARGET, pool receives target,
+    // pool pays USDC to the user's USDC ATA.
+    async function buildSellSwap(r: any, amountIn: number, outUsdc: number) {
+      const ix = await ms.methods
+        .swap(new anchor.BN(amountIn), new anchor.BN(outUsdc))
+        .accounts({
+          sourceUsdc: r.transientTarget,
+          sourceAuthority: r.buyAuth,
+          poolUsdc: poolTarget,   // receives the sold target tokens
+          poolTarget: poolUsdc,   // pays USDC out of the pool
+          destTarget: r.destUsdc,
+          poolAuthority,
+          tokenProgram: TOKEN_PROGRAM_ID,
+        })
+        .instruction();
+      return { data: ix.data as Buffer, keys: ix.keys };
+    }
+
+    async function executeSell(r: any, minOut: number, swap: any) {
+      return rb.methods
+        .executeSell(new anchor.BN(minOut), swap.data)
+        .accounts({
+          keeper: payer.publicKey,
+          config,
+          user: r.user.publicKey,
+          sellPlan: r.plan,
+          buyAuthority: r.buyAuth,
+          transientTarget: r.transientTarget,
+          userTargetAta: r.userTarget,
+          destUsdc: r.destUsdc,
+          swapProgram: ms.programId,
+          tokenProgram: TOKEN_PROGRAM_ID,
+        })
+        .remainingAccounts(swap.keys)
+        .rpc();
+    }
+
+    before(async () => {
+      // The sell direction pays USDC out of the pool: fund it.
+      await mintTo(connection, payer, usdcMint, poolUsdc, payer, 1_000_000_000_000);
+    });
+
+    it("sell happy path: amortized draw -> USDC to the user, transient drains, clock advances", async () => {
+      const r = await newRetiree(90_000_000, 10_000_000); // pot 100 total, 10 pulled
+      await openPlan(r, 10); // cap ~ 100/9..10 >= 10
+      const swap = await buildSellSwap(r, 10_000_000, 10_000_000); // $1/token
+      await executeSell(r, 9_900_000, swap);
+
+      assert.equal(await bal(r.transientTarget), 0, "transient drained (INV-3)");
+      assert.equal(await bal(r.destUsdc), 10_000_000, "USDC delivered to the user");
+      const plan: any = await (rb.account as any).sellPlan.fetch(r.plan);
+      assert.ok(plan.nextDueTs.toNumber() > Math.floor(Date.now() / 1000), "clock gate advanced past now");
+    });
+
+    it("M2 INV-5: rejects a pull exceeding the amortized schedule cap", async () => {
+      const r = await newRetiree(80_000_000, 20_000_000); // pot 100, cap ~ 100/9..10 < 20
+      await openPlan(r, 10);
+      const swap = await buildSellSwap(r, 20_000_000, 20_000_000);
+      try {
+        await executeSell(r, 19_800_000, swap);
+        assert.fail("should have reverted");
+      } catch (e: any) {
+        assert.equal(e.error?.errorCode?.code, "OverdrawSchedule");
+      }
+      assert.equal(await bal(r.transientTarget), 20_000_000, "funds untouched on revert");
+    });
+
+    it("M2 INV-6: second crank in the same period is NotDue", async () => {
+      const r = await newRetiree(90_000_000, 10_000_000);
+      await openPlan(r, 10);
+      const swap1 = await buildSellSwap(r, 10_000_000, 10_000_000);
+      await executeSell(r, 9_900_000, swap1);
+      // refill the transient (as if pulled again) and crank immediately
+      await mintTo(connection, payer, targetMint, r.transientTarget, payer, 5_000_000);
+      const swap2 = await buildSellSwap(r, 5_000_000, 5_000_000);
+      try {
+        await executeSell(r, 4_950_000, swap2);
+        assert.fail("should have reverted");
+      } catch (e: any) {
+        assert.equal(e.error?.errorCode?.code, "NotDue");
+      }
+    });
+
+    it("INV-2 (sell): mandatory floor rejects a lowball min_out", async () => {
+      const r = await newRetiree(90_000_000, 10_000_000);
+      await openPlan(r, 10);
+      const swap = await buildSellSwap(r, 10_000_000, 10_000_000);
+      try {
+        await executeSell(r, 1, swap); // floor is 9_900_000 uUSDC
+        assert.fail("should have reverted");
+      } catch (e: any) {
+        assert.equal(e.error?.errorCode?.code, "MinOutTooLow");
+      }
+    });
+
+    it("open rejects a sub-minimum period; close returns rent to the owner", async () => {
+      const r = await newRetiree(0, 0);
+      const now = Math.floor(Date.now() / 1000);
+      try {
+        await rb.methods
+          .openSellPlan(new anchor.BN(now + 3600), new anchor.BN(30)) // 30s < MIN_PERIOD_SECS
+          .accountsPartial({ user: r.user.publicKey, sellPlan: r.plan })
+          .signers([r.user])
+          .rpc();
+        assert.fail("should have reverted");
+      } catch (e: any) {
+        assert.equal(e.error?.errorCode?.code, "BadParam");
+      }
+      await openPlan(r, 10);
+      await rb.methods
+        .closeSellPlan()
+        .accountsPartial({ user: r.user.publicKey, sellPlan: r.plan })
+        .signers([r.user])
+        .rpc();
+      const gone = await connection.getAccountInfo(r.plan);
+      assert.isNull(gone, "plan account closed");
+    });
+  });
 });

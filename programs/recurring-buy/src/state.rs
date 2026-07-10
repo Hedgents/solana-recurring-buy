@@ -5,6 +5,11 @@ pub const MAX_SWAP_PROGRAMS: usize = 3;
 
 pub const CONFIG_SEED: &[u8] = b"config";
 pub const BUY_AUTH_SEED: &[u8] = b"buy";
+pub const SELL_PLAN_SEED: &[u8] = b"sell-plan";
+
+/// Cadence bounds for a sell plan: 1 minute (test-friendly) to 1 year.
+pub const MIN_PERIOD_SECS: i64 = 60;
+pub const MAX_PERIOD_SECS: i64 = 366 * 86_400;
 
 #[account]
 #[derive(InitSpace)]
@@ -36,5 +41,33 @@ pub struct Config {
 impl Config {
     pub fn is_whitelisted(&self, program_id: &Pubkey) -> bool {
         self.swap_programs[..self.swap_program_count as usize].contains(program_id)
+    }
+}
+
+/// M2 decumulation: a per-user amortized sell schedule (SPEC_M2 §4). Holds
+/// schedule parameters ONLY — never balances. The "pot" is the user's own
+/// wallet balance of the target asset, read at execution time, so the runway
+/// (`remaining_balance / remaining_periods`) is self-correcting by construction.
+#[account]
+#[derive(InitSpace)]
+pub struct SellPlan {
+    /// Owner. Only signer who can open/close the plan.
+    pub user: Pubkey,
+    /// When the schedule completes (user-chosen horizon).
+    pub end_ts: i64,
+    /// Payout cadence in seconds.
+    pub period_secs: i64,
+    /// Clock gate for the permissionless crank. Advanced past `now` on each
+    /// execution (missed periods are skipped, not caught up: re-amortization
+    /// spreads the remainder — SPEC_M2 §6.6).
+    pub next_due_ts: i64,
+    pub bump: u8,
+}
+
+impl SellPlan {
+    /// Periods left in the schedule, floored at 1 so the final period (and any
+    /// time past `end_ts`) allows selling the full remainder.
+    pub fn remaining_periods(&self, now: i64) -> i64 {
+        (self.end_ts.saturating_sub(now) / self.period_secs).max(1)
     }
 }

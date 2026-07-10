@@ -28,4 +28,8 @@ pub enum BuyError {
     Overflow,
     #[msg("Invalid parameter")]
     BadParam,
+    #[msg("M2: sell is not due yet (clock gate)")]
+    NotDue,
+    #[msg("M2 INV-5: pull exceeds the amortized schedule cap")]
+    OverdrawSchedule,
 }

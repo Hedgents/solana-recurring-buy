@@ -97,9 +97,9 @@ Extends `RecurringBuyKeeper` with the mirrored leg: `buildExecuteSell` + a deleg
 - **M2.3:** client runway/smoothing display math (off-chain, guidance layer).
 - Third-party audit covers M1+M2 together (one scope, still small).
 
-## 11. Open questions
+## 11. Open questions — status
 
-1. Whether the native Subscriptions rail accepts arbitrary SPL mints for delegations (expected yes — it is mint-parameterized; verify on devnet with the mock target mint).
+1. **RESOLVED (devnet, 2026-07-10).** The native Subscriptions rail accepts arbitrary SPL mints for delegations: `keeper/native/e2e_sell.mjs` ran a real delegation + `transfer_recurring` on the mock target mint, composed atomically with `execute_sell` in one transaction (amortized draw enforced, USDC delivered to the user, transient drained).
 2. `remaining_periods` rounding policy at the tail (final period sells the exact remainder; guard div-by-zero at `end_ts`).
 3. Whether `execute_sell` should also enforce a per-period *minimum* (dust guard) so keepers don't crank economically meaningless sells.
 4. Same mainnet items as M1: live venue route (Jupiter/Orca), Pyth reference, instruction-sysvar binding of the pull, multisig admin.
